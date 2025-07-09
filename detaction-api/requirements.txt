@@ -1,0 +1,7 @@
+Flask
+ultralytics
+opencv-python
+PyYAML
+numpy
+pytesseract
+face_recognition # use for appv2

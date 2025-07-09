@@ -1,0 +1,25 @@
+CREATE TABLE Passport (
+    passport_id INT AUTO_INCREMENT NOT NULL,
+    mrz VARCHAR(255) NOT NULL,
+    format CHAR(10) NOT NULL,
+    countryCode CHAR(10),
+    passportNumber CHAR(15),
+    firstName VARCHAR(30),
+    lastName VARCHAR(30),
+    sex CHAR(1) NOT NULL,
+    birthDate DATE NOT NULL,
+    issueDate DATE NOT NULL,
+    expiryDate DATE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (passport_id)
+);
+
+
+CREATE TABLE Img_history (
+  id INT AUTO_INCREMENT NOT NULL,
+  img_path VARCHAR(150) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id)
+);
