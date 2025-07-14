@@ -1,35 +1,58 @@
+# Use Python 3.10 base image
 FROM python:3.10-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+# Environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    TESSDATA_PREFIX=/usr/share/tesseract-ocr/tessdata
 
+# Set working directory
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    libffi-dev \
-    libssl-dev \
-    python3-dev \
-    libbz2-dev \
-    liblzma-dev \
-    libjpeg-dev \
-    zlib1g-dev \
-    libsqlite3-dev \
-    libfreetype6-dev \
-    libpng-dev \
+    wget \
+    curl \
     tesseract-ocr \
     tesseract-ocr-eng \
-    pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+    libglib2.0-0 \
+    libgl1-mesa-glx \
+    libsm6 \
+    libxrender1 \
+    libxext6 \
+    libjpeg-dev \
+    zlib1g-dev \
+    libleptonica-dev \
+    libopenblas-dev \
+    liblapack-dev \
+    libatlas-base-dev \
+    libboost-all-dev \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# Verify Tesseract installation and find the actual tessdata location
+RUN mkdir -p ${TESSDATA_PREFIX} && \
+    if [ ! -f "${TESSDATA_PREFIX}/eng.traineddata" ]; then \
+        find / -name "eng.traineddata" -exec cp {} ${TESSDATA_PREFIX}/ \; || \
+        (echo "Could not find eng.traineddata, downloading..." && \
+         wget -O ${TESSDATA_PREFIX}/eng.traineddata https://github.com/tesseract-ocr/tessdata/raw/main/eng.traineddata); \
+    fi
 
-COPY . /app
+# First copy only requirements.txt to cache the pip install step
+COPY requirements.txt .
 
+# Install Python packages in two steps to reduce memory pressure
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt --no-warn-script-location
+
+# Now copy the rest of the application
+COPY . .
+
+# Expose the port your Flask app uses
 EXPOSE 5000
 
+# Run your Flask app
 CMD ["python", "app.py"]

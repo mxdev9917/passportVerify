@@ -1,7 +1,10 @@
-Flask
-ultralytics
-opencv-python
-PyYAML
-numpy
-pytesseract
-face_recognition # use for appv2
+flask>=2.0.0
+ultralytics>=8.0.0
+opencv-python-headless>=4.5.0
+numpy>=1.20.0
+pytesseract>=0.3.8
+face-recognition>=1.3.0
+face-recognition-models>=0.3.0
+torch>=1.10.0
+torchvision>=0.11.0
+requests>=2.26.0

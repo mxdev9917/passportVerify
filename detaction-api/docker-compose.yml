@@ -1,0 +1,10 @@
+version: '3.8'
+
+services:
+  detector:
+    platform: linux/arm64
+    image: mx9917/detector:latest
+    container_name: detector_service
+    ports:
+      - "5001:5000"  # assuming the app inside the container runs on port 5000
+    restart: unless-stopped
