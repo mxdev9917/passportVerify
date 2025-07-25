@@ -185,6 +185,87 @@ def compare_faces(photo_img, personal_img):
         return False
 
 
+@app.route("/help", methods=["GET"])
+def help():
+    """Provides documentation and usage instructions for the API"""
+    help_info = {
+        "service": "Passport Verification API",
+        "description": "This service verifies passport documents by detecting key elements (Passport, Photo, MRZ) and extracting information from the Machine Readable Zone (MRZ). It can also compare the passport photo with a personal photo for identity verification.",
+        "endpoints": [
+            {
+                "path": "/predict",
+                "method": "POST",
+                "description": "Full passport verification including face matching",
+                "parameters": {
+                    "image": "Passport image file (required)",
+                    "personal_image": "Personal photo for face comparison (required)"
+                },
+                "response": {
+                    "verify": "Boolean indicating overall verification status",
+                    "message": "Status message",
+                    "mrz": {
+                        "birth_date": "Extracted birth date",
+                        "birth_date_valid": "Checksum validation status",
+                        "expiry_date": "Extracted expiry date",
+                        "expiry_date_valid": "Checksum validation status",
+                        "nationality": "Extracted nationality code",
+                        "passport_number": "Extracted passport number",
+                        "passport_number_valid": "Checksum validation status",
+                        "raw_text": "Raw MRZ text",
+                        "sex": "Extracted gender"
+                    },
+                    "photo_match": "Boolean indicating if passport photo matches personal photo",
+                    "debug": "Debug information including processed images"
+                }
+            },
+            {
+                "path": "/verify",
+                "method": "POST",
+                "description": "Basic passport verification (MRZ and document validation only)",
+                "parameters": {
+                    "image": "Passport image file (required)"
+                },
+                "response": {
+                    "verify": "Boolean indicating verification status",
+                    "message": "Status message",
+                    "mrz": "Extracted MRZ information (same format as /predict)",
+                    "debug": "Debug information"
+                }
+            },
+            {
+                "path": "/output/<filename>",
+                "method": "GET",
+                "description": "Retrieve processed images for debugging",
+                "parameters": {
+                    "filename": "Name of the output file"
+                }
+            },
+            {
+                "path": "/help",
+                "method": "GET",
+                "description": "API documentation and usage instructions"
+            }
+        ],
+        "requirements": {
+            "passport_image": "Should clearly show the passport with visible MRZ zone",
+            "personal_image": "Clear frontal face photo for comparison",
+            "supported_formats": "JPEG, PNG"
+        },
+        "notes": [
+            "The service uses computer vision and may not be 100% accurate",
+            "Face matching requires reasonably clear images of faces",
+            "MRZ parsing requires the MRZ to be clearly visible and properly oriented",
+            "Debug images are automatically deleted when the server restarts"
+        ],
+        "example_usage": {
+            "curl_predict": 'curl -X POST -F "image=@passport.jpg" -F "personal_image=@selfie.jpg" http://localhost:5000/predict',
+            "curl_verify": 'curl -X POST -F "image=@passport.jpg" http://localhost:5000/verify',
+            "curl_help": 'curl http://localhost:5000/help'
+        }
+    }
+    return jsonify(help_info)
+
+
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
