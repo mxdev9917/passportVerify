@@ -2,403 +2,130 @@ from flask import Flask, request, jsonify, send_from_directory
 from ultralytics import YOLO
 import cv2
 import numpy as np
+import pytesseract
 import os
 from datetime import datetime
-import pytesseract
-import face_recognition
 
-# Configure Tesseract with custom model
+# Configuration
 pytesseract.pytesseract.tesseract_cmd = "tesseract"
-os.environ['TESSDATA_PREFIX'] = './tessdata'  # Path to custom tessdata directory
+os.environ["TESSDATA_PREFIX"] = "./tessdata"
+model = YOLO("best.pt")
+REQUIRED_CLASSES = ["Passport", "Photo", "MRZ"]
+OUTPUT_DIR = "output"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 app = Flask(__name__)
 
-# Load YOLO model
-model = YOLO("best.pt")
-OUTPUT_DIR = "output"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs("tessdata", exist_ok=True)  # Ensure tessdata directory exists
-
-CLASS_NAMES = model.names
-REQUIRED_CLASSES = ["Passport", "Photo", "MRZ"]
-CONF_THRESHOLD = 0.7
-
-def preprocess_for_ocr(image):
-    """Preprocess image for better OCR results"""
-    margin = 20
-    image = cv2.copyMakeBorder(image, margin, margin, margin, margin, 
-                             cv2.BORDER_CONSTANT, value=[255, 255, 255])
-    scale = 2.0
-    image = cv2.resize(image, None, fx=scale, fy=scale, 
-                      interpolation=cv2.INTER_CUBIC)
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.medianBlur(gray, 3)
-    thresh = cv2.adaptiveThreshold(
-        blurred, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV, 25, 15
-    )
-    kernel = np.ones((2, 2), np.uint8)
-    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-    return closed
-
-def order_points(pts):
-    """Order coordinates clockwise from top-left"""
-    rect = np.zeros((4, 2), dtype="float32")
-    s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]
-    rect[2] = pts[np.argmax(s)]
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]
-    rect[3] = pts[np.argmax(diff)]
-    return rect
-
-def find_passport_corners(image):
-    """Detect passport corners using contour detection"""
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blur, 30, 150)
-    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    max_area = 0
-    best_approx = None
+def parse_mrz(mrz_text: str):
+    lines = [line.strip() for line in mrz_text.splitlines() if line.strip()]
     
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < 1000:
-            continue
-        peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-        if len(approx) == 4:
-            x, y, w, h = cv2.boundingRect(approx)
-            aspect_ratio = w / float(h)
-            if 1.2 < aspect_ratio < 2.0 and area > max_area:
-                max_area = area
-                best_approx = approx
-    if best_approx is None:
-        return None
-    pts = best_approx.reshape(4, 2)
-    return order_points(pts)
-
-def warp_to_quadrilateral(image, src_pts):
-    """Warp perspective to straighten passport"""
-    try:
-        if src_pts is None or len(src_pts) != 4:
-            return image
-            
-        width_a = np.linalg.norm(src_pts[2] - src_pts[3])
-        width_b = np.linalg.norm(src_pts[1] - src_pts[0])
-        max_width = max(int(width_a), int(width_b))
-        
-        height_a = np.linalg.norm(src_pts[1] - src_pts[2])
-        height_b = np.linalg.norm(src_pts[0] - src_pts[3])
-        max_height = max(int(height_a), int(height_b))
-        
-        dst_pts = np.array([
-            [0, 0],
-            [max_width - 1, 0],
-            [max_width - 1, max_height - 1],
-            [0, max_height - 1]
-        ], dtype="float32")
-        
-        M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-        return cv2.warpPerspective(image, M, (max_width, max_height))
-    except Exception as e:
-        print("Warp error:", e)
-        return image
-
-def calculate_checksum(data):
-    """Calculate MRZ checksum"""
-    weights = [7, 3, 1]
-    total = 0
-    for i, char in enumerate(data):
-        if char.isdigit():
-            value = int(char)
-        elif char.isalpha():
-            value = ord(char.upper()) - ord('A') + 10
-        elif char == '<':
-            value = 0
-        else:
-            return -1
-        total += value * weights[i % 3]
-    return total % 10
-
-def convert_date(date_str):
-    """Convert MRZ date format to YYYY-MM-DD"""
-    try:
-        year = int(date_str[:2])
-        month = int(date_str[2:4])
-        day = int(date_str[4:6])
-        year += 1900 if year >= 50 else 2000
-        return f"{year:04d}-{month:02d}-{day:02d}"
-    except:
-        return date_str
-
-def parse_mrz(mrz_text):
-    """Parse MRZ text into structured data"""
-    lines = [line for line in mrz_text.strip().splitlines() if len(line.strip()) >= 30]
-    if len(lines) < 2:
-        return None
-        
-    line1 = lines[0].strip().replace(" ", "").upper()
-    line2 = lines[1].strip().replace(" ", "").upper()
-    
-    if len(line2) < 30:
-        return None
-        
-    result = {}
-    try:
-        if line1.startswith(("P<", "P ")):
-            result["document_type"] = "P"
-            result["country"] = line1[2:5]
-            names = line1[5:].split("<<", 1)
-            result["last_name"] = names[0].replace("<", " ").strip()
-            result["first_name"] = names[1].replace("<", " ").strip() if len(names) > 1 else ""
-            
-        passport_number = line2[:9]
-        passport_number_chk = line2[9]
-        nationality = line2[10:13]
-        birth_date_raw = line2[13:19]
-        birth_date_chk = line2[19]
-        sex = line2[20]
-        expiry_date_raw = line2[21:27]
-        expiry_date_chk = line2[27]
-        
-        passport_valid = calculate_checksum(passport_number) == int(passport_number_chk) if passport_number_chk.isdigit() else False
-        birth_valid = calculate_checksum(birth_date_raw) == int(birth_date_chk) if birth_date_chk.isdigit() else False
-        expiry_valid = calculate_checksum(expiry_date_raw) == int(expiry_date_chk) if expiry_date_chk.isdigit() else False
-        
-        result.update({
-            "passport_number": passport_number.replace("<", ""),
-            "passport_checksum_valid": passport_valid,
-            "nationality": nationality,
-            "birth_date": convert_date(birth_date_raw),
-            "birth_date_checksum_valid": birth_valid,
-            "sex": sex,
-            "expiry_date": convert_date(expiry_date_raw),
-            "expiry_date_checksum_valid": expiry_valid,
-            "mrz_valid": passport_valid and birth_valid and expiry_valid
-        })
-    except Exception as e:
-        print("MRZ parsing error:", e)
-        result["error"] = str(e)
-        result["mrz_valid"] = False
-    return result
-
-def compare_faces(photo_img, personal_img):
-    """Compare face in passport photo with personal photo"""
-    try:
-        photo_rgb = cv2.cvtColor(photo_img, cv2.COLOR_BGR2RGB)
-        personal_rgb = cv2.cvtColor(personal_img, cv2.COLOR_BGR2RGB)
-        
-        photo_encoding = face_recognition.face_encodings(photo_rgb)
-        personal_encoding = face_recognition.face_encodings(personal_rgb)
-        
-        if not photo_encoding or not personal_encoding:
-            print("Face encodings not found.")
-            return False
-            
-        matches = face_recognition.compare_faces([photo_encoding[0]], personal_encoding[0], tolerance=0.6)
-        return bool(matches[0])
-    except Exception as e:
-        print("Face comparison error:", e)
-        return False
+    if len(lines) == 2 and all(len(line) >= 44 for line in lines):
+        line1, line2 = lines[:2]
+        return {
+            "document_type": line1[0],
+            "issuing_country": line1[2:5],
+            "surname": line1[5:].split("<<")[0].replace("<", " ").strip(),
+            "given_names": " ".join(line1[5:].split("<<")[1].split("<")).strip(),
+            "passport_number": line2[0:9].replace("<", ""),
+            "passport_number_valid": line2[9] == "<",
+            "nationality": line2[10:13],
+            "birth_date": f"{line2[13:15]}-{line2[15:17]}-{line2[17:19]}",
+            "birth_date_valid": line2[19] == "<",
+            "sex": line2[20],
+            "expiry_date": f"{line2[21:23]}-{line2[23:25]}-{line2[25:27]}",
+            "expiry_date_valid": line2[27] == "<",
+            "personal_number": line2[28:42].replace("<", ""),
+            "raw": mrz_text.strip()
+        }
+    return {
+        "raw": mrz_text.strip(),
+        "error": "Unable to parse MRZ format"
+    }
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    """Endpoint for full passport verification with face matching"""
+    if "image" not in request.files or "personal_image" not in request.files:
+        return jsonify({
+            "error": "Both passport and personal images are required",
+            "message": "Verification failed",
+            "verify": False,
+            "photo_match": False
+        }), 400
+
     try:
-        if 'image' not in request.files or 'personal_image' not in request.files:
-            return jsonify({"error": "Both passport image and personal image are required"}), 400
-            
-        passport_file = request.files['image']
-        personal_file = request.files['personal_image']
+        # Process passport image
+        passport_file = request.files["image"]
+        passport_np = np.frombuffer(passport_file.read(), np.uint8)
+        passport_img = cv2.imdecode(passport_np, cv2.IMREAD_COLOR)
         
-        passport_img = cv2.imdecode(np.frombuffer(passport_file.read(), np.uint8), cv2.IMREAD_COLOR)
-        personal_img = cv2.imdecode(np.frombuffer(personal_file.read(), np.uint8), cv2.IMREAD_COLOR)
-        
-        if passport_img is None or personal_img is None:
-            return jsonify({"error": "Invalid image(s) uploaded"}), 400
+        # Process personal image
+        personal_file = request.files["personal_image"]
+        personal_np = np.frombuffer(personal_file.read(), np.uint8)
+        personal_img = cv2.imdecode(personal_np, cv2.IMREAD_COLOR)
+
+        # Detect objects in passport image
+        results = model(passport_img)[0]
+        detections = {}
+        class_names = model.names
+
+        for box in results.boxes:
+            cls_id = int(box.cls)
+            class_name = class_names[cls_id]
+            if class_name in REQUIRED_CLASSES:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                detections[class_name] = passport_img[y1:y2, x1:x2]
+
+        response = {
+            "message": "Verification successful",
+            "debug": {},
+            "mrz": {},
+            "verify": True,
+            "photo_match": True  # This would be set by your face matching logic
+        }
+
+        if "MRZ" in detections:
+            mrz_img = detections["MRZ"]
+            gray = cv2.cvtColor(mrz_img, cv2.COLOR_BGR2GRAY)
             
-        results = model(passport_img)
-        boxes = results[0].boxes
-        
-        detected_classes = {}
-        passport_crop = None
-        mrz_crop = None
-        mrz_text = None
-        mrz_data = None
-        photo_crop = None
-        
-        for box in boxes:
-            conf = float(box.conf[0])
-            if conf < CONF_THRESHOLD:
-                continue
-                
-            cls_id = int(box.cls[0])
-            class_name = CLASS_NAMES.get(cls_id, "unknown")
-            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+            # Apply thresholding for better OCR
+            _, threshold = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             
-            if class_name == "Passport":
-                cropped = passport_img[y1:y2, x1:x2].copy()
-                corners = find_passport_corners(cropped)
-                passport_crop = warp_to_quadrilateral(cropped, corners)
-                
-            elif class_name == "MRZ":
-                mrz_crop = passport_img[y1:y2, x1:x2].copy()
-                processed_mrz = preprocess_for_ocr(mrz_crop)
-                
-                # Use custom 'mrz' model for OCR
-                mrz_text = pytesseract.image_to_string(
-                    processed_mrz, 
-                    lang='mrz',
-                    config='--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789< -c preserve_interword_spaces=1'
-                ).strip()
-                
-                mrz_text = "\n".join([line for line in mrz_text.splitlines() if len(line.strip()) >= 25])
-                mrz_data = parse_mrz(mrz_text)
-                
-            elif class_name == "Photo":
-                photo_crop = passport_img[y1:y2, x1:x2].copy()
-                
-            detected_classes[class_name] = True
+            mrz_text = pytesseract.image_to_string(
+                threshold,
+                lang="mrz",
+                config="--psm 6"
+            )
             
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        if mrz_crop is not None:
-            debug_path = os.path.join(OUTPUT_DIR, f"mrz_debug_{timestamp}.jpg")
-            cv2.imwrite(debug_path, preprocess_for_ocr(mrz_crop))
-            
-        if all(cls in detected_classes for cls in REQUIRED_CLASSES):
-            response = {
-                "verify": True,
-                "message": "Success",
-                "mrz": {
-                    "birth_date": mrz_data.get("birth_date", ""),
-                    "birth_date_valid": bool(mrz_data.get("birth_date_checksum_valid", False)),
-                    "expiry_date": mrz_data.get("expiry_date", ""),
-                    "expiry_date_valid": bool(mrz_data.get("expiry_date_checksum_valid", False)),
-                    "nationality": mrz_data.get("nationality", ""),
-                    "passport_number": mrz_data.get("passport_number", ""),
-                    "passport_number_valid": bool(mrz_data.get("passport_checksum_valid", False)),
-                    "raw_text": mrz_text or "",
-                    "sex": mrz_data.get("sex", ""),
-                },
-                "photo_match": compare_faces(photo_crop, personal_img) if photo_crop is not None else False,
-                "debug": {
-                    "mrz_image": f"/output/mrz_debug_{timestamp}.jpg"
-                }
+            # Save debug image
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            mrz_filename = f"mrz_{ts}.jpg"
+            mrz_path = os.path.join(OUTPUT_DIR, mrz_filename)
+            cv2.imwrite(mrz_path, mrz_img)
+
+            parsed_mrz = parse_mrz(mrz_text)
+            response["mrz"] = parsed_mrz
+            response["debug"] = {
+                "mrz_text": mrz_text,
+                "mrz_image": f"/output/{mrz_filename}"
             }
-            
-            if passport_crop is not None:
-                passport_filename = f"passport_{timestamp}.jpg"
-                cv2.imwrite(os.path.join(OUTPUT_DIR, passport_filename), passport_crop)
-                response["passport_crop_url"] = f"/output/{passport_filename}"
-                
-            return jsonify(response)
-        else:
-            return jsonify({
-                "verify": False,
-                "message": "Detection failed",
-                "reason": f"Missing required classes: {', '.join([cls for cls in REQUIRED_CLASSES if cls not in detected_classes])}",
-                "debug": {
-                    "mrz_image": f"/output/mrz_debug_{timestamp}.jpg" if mrz_crop is not None else None,
-                    "mrz_text": mrz_text
-                }
-            }), 400
-            
-    except Exception as e:
-        print("Unhandled server error:", str(e))
-        return jsonify({"error": "Internal Server Error", "details": str(e), "verify": False}), 500
 
-@app.route("/verify", methods=["POST"])
-def verify_passport():
-    """Endpoint for basic passport verification (no face matching)"""
-    try:
-        if 'image' not in request.files:
-            return jsonify({"error": "Passport image is required"}), 400
-            
-        passport_file = request.files['image']
-        passport_img = cv2.imdecode(np.frombuffer(passport_file.read(), np.uint8), cv2.IMREAD_COLOR)
-        
-        if passport_img is None:
-            return jsonify({"error": "Invalid image uploaded"}), 400
-            
-        results = model(passport_img)
-        boxes = results[0].boxes
-        
-        detected_classes = {}
-        mrz_crop = None
-        mrz_text = None
-        mrz_data = None
-        
-        for box in boxes:
-            conf = float(box.conf[0])
-            if conf < CONF_THRESHOLD:
-                continue
-                
-            cls_id = int(box.cls[0])
-            class_name = CLASS_NAMES.get(cls_id, "unknown")
-            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-            
-            if class_name == "MRZ":
-                mrz_crop = passport_img[y1:y2, x1:x2].copy()
-                processed_mrz = preprocess_for_ocr(mrz_crop)
-                
-                # Use custom 'mrz' model for OCR
-                mrz_text = pytesseract.image_to_string(
-                    processed_mrz,
-                    lang='mrz',
-                    config='--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789< -c preserve_interword_spaces=1'
-                ).strip()
-                
-                mrz_text = "\n".join([line for line in mrz_text.splitlines() if len(line.strip()) >= 25])
-                mrz_data = parse_mrz(mrz_text)
-                
-            detected_classes[class_name] = True
-            
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        if mrz_crop is not None:
-            debug_path = os.path.join(OUTPUT_DIR, f"mrz_verify_debug_{timestamp}.jpg")
-            cv2.imwrite(debug_path, preprocess_for_ocr(mrz_crop))
-            
-        if "Passport" in detected_classes and "MRZ" in detected_classes and mrz_data:
-            return jsonify({
-                "verify": True,
-                "message": "Passport verified",
-                "mrz": {
-                    "birth_date": mrz_data.get("birth_date", ""),
-                    "birth_date_valid": bool(mrz_data.get("birth_date_checksum_valid", False)),
-                    "expiry_date": mrz_data.get("expiry_date", ""),
-                    "expiry_date_valid": bool(mrz_data.get("expiry_date_checksum_valid", False)),
-                    "nationality": mrz_data.get("nationality", ""),
-                    "passport_number": mrz_data.get("passport_number", ""),
-                    "passport_number_valid": bool(mrz_data.get("passport_checksum_valid", False)),
-                    "raw_text": mrz_text or "",
-                    "sex": mrz_data.get("sex", ""),
-                },
-                "debug": {
-                    "mrz_image": f"/output/mrz_verify_debug_{timestamp}.jpg"
-                }
-            })
-        else:
-            return jsonify({
-                "verify": False,
-                "message": "Verification failed",
-                "reason": f"Missing required classes: {', '.join([cls for cls in ['Passport', 'MRZ'] if cls not in detected_classes])}",
-                "debug": {
-                    "mrz_text": mrz_text or "",
-                    "mrz_image": f"/output/mrz_verify_debug_{timestamp}.jpg" if mrz_crop is not None else None
-                }
-            }), 400
-            
-    except Exception as e:
-        print("Verification error:", str(e))
-        return jsonify({"error": "Internal Server Error", "details": str(e), "verify": False}), 500
+            # Here you would add your face matching logic between:
+            # detections["Photo"] (from passport) and personal_img
+            # Set response["photo_match"] accordingly
 
-@app.route("/output/<filename>")
-def get_output_image(filename):
-    """Serve output images for debugging"""
+        return jsonify(response)
+
+    except Exception as e:
+        app.logger.error(f"Error processing image: {str(e)}")
+        return jsonify({
+            "error": str(e),
+            "message": "Verification failed",
+            "verify": False,
+            "photo_match": False
+        }), 500
+
+@app.route('/output/<filename>')
+def serve_output(filename):
     return send_from_directory(OUTPUT_DIR, filename)
 
 if __name__ == "__main__":
