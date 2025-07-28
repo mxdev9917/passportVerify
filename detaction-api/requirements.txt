@@ -8,3 +8,8 @@ face-recognition-models>=0.3.0
 torch>=1.10.0
 torchvision>=0.11.0
 requests>=2.26.0
+scikit-image>=0.18.0
+pillow>=8.3.1
+cmake>=3.18.0
+dlib>=19.22.0
+setuptools<81.0.0  # To prevent the warning you're seeing
