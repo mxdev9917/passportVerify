@@ -1,5 +1,4 @@
-output/
-uploads/
+
 __pycache__/
 *.pyc
 *.pyo
