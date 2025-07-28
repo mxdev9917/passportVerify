@@ -27,6 +27,7 @@ def passport_controller(request):
             "face_match": False
         }
 
+        # Detect objects in passport image
         results = model(passport_img, conf=0.7)[0]
         detections = {
             model.names[int(box.cls)]: passport_img[
@@ -37,19 +38,23 @@ def passport_controller(request):
             if model.names[int(box.cls)] in REQUIRED_CLASSES
         }
 
+        # Passport presence
         if "Passport" in detections:
             score += 20
             components["passport_detected"] = True
 
+        # Photo presence
         passport_photo = detections.get("Photo")
         if passport_photo is not None:
             score += 20
             components["photo_detected"] = True
 
+        # Face presence
         if user_photo is not None and len(user_photo.shape) == 3:
             score += 10
             components["face_detected"] = True
 
+        # Face match
         similarity = 0.0
         if passport_photo is not None and components["face_detected"]:
             match, similarity = compare_faces(passport_photo, user_photo)
@@ -57,6 +62,7 @@ def passport_controller(request):
                 score += 40
                 components["face_match"] = True
 
+        # MRZ parsing
         mrz_data = {}
         if "MRZ" in detections:
             score += 10
