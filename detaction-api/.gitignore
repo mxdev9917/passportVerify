@@ -10,3 +10,4 @@ venv/
 *.sqlite3
 *.log
 best.pt
+mrz.traineddata
