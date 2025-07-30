@@ -10,3 +10,4 @@ venv/
 *.log
 best.pt
 mrz.traineddata
+.static/
